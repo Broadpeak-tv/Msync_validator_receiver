@@ -1,7 +1,9 @@
 # Msync protocol receiver validation tool
 
 This project implements a simple MSYNC receiver according to the IETF draft: https://www.ietf.org/archive/id/draft-bichot-msync-04.txt
+
 The tool allows to validate streams sent according to the MSYNC protocol.
+
 The code is available here: https://github.com/Broadpeak-tv/Msync_validator_receiver.git
 
 # Usage
