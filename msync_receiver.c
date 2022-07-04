@@ -15,11 +15,6 @@
 #include <signal.h>
 #include <pthread.h>
 #include <stdbool.h>
-#ifdef TARGETOS_eCos
-#include <sys/socket.h>                          /* Must be before netinet/in.h */
-#include <netinet/in.h>                          /* Must be before arpa/inet.h */
-#include <net/netdb.h>                           /* for inet_ntop() family, includes netinet/in.h */
-#endif
 #if defined HAVE_GETIFADDRS
 #include <ifaddrs.h>
 #endif
@@ -210,7 +205,6 @@ olist_t *put_object(uint16_t oid, object_descriptor_t *obj)
 /*
  * usage()
  */
-#ifndef TARGETOS_eCos
 static void usage(void)
 {
 	printf(
@@ -225,7 +219,6 @@ static void usage(void)
 		"       -v  Verbose mode\n"
 		"\n");
 }
-#endif
 
 #if defined HAVE_GETIFADDRS
 static char * get_interface_address(char * iname)
@@ -588,11 +581,7 @@ static void* msync_receiver(void* arg)
 
 	while (1)
 	{
-#ifndef TARGETOS_eCos
 		if ((len = read(*sd, packet, MSYNC_PAYLOAD_MTU_MAX)) <= 0)
-#else
-		if ((len = recv(*sd, packet, MSYNC_PAYLOAD_MTU_MAX, 0)) <= 0)
-#endif
 		{
 			if (errno == EINTR)
 			{
@@ -630,39 +619,42 @@ static void* msync_receiver(void* arg)
 			}
 
 			/* Object Info Packet Header */
-			if (msync_h->version==0x03 && ((msync_h->type == MSYNC_TYPE_OINFO) ||
-					(msync_h->type == MSYNC_TYPE_OINFO_CHECK)))
+			if (msync_h->version==0x03 && ((msync_h->type == MSYNC_PACKET_TYPE_OINFO) ||
+					(msync_h->type == MSYNC_PACKET_TYPE_OINFO_REDUNDANCY)))
 			{
-				uint8_t mtype = ntohs(oinfo_h->mtype_uri_size) >> 12;
-				uint16_t uri_size = ntohs(oinfo_h->mtype_uri_size) & 0x0FFF;
+				uint16_t max_uri_len = len - 24; //  Object Info Packet Header len without URI
+				if (rtp) 
+					max_uri_len = max_uri_len - RTP_HEADER_LEN;
+				uint8_t mtype = ntohs(oinfo_h->mtype_UriSize) >> 12;
+				uint16_t uri_size = ntohs(oinfo_h->mtype_UriSize) & 0x0FFF;
 				oinfo_h->uri[MIN(uri_size, MSYNC_URI_LENGTH_MAX - 1)] = '\0';
 				if (verbose)
 					printf("  %d %s: %u bytes in %u packets (CRC 0x%08X) - type: %s, manifest type: %s, uri size: %u, media_seq: %u, uri: %s\n",
 							*sd, 
-							msync_h->type == MSYNC_TYPE_OINFO ? "Object Info\t" : "Object Info Redundancy\t",
-							ntohl(oinfo_h->size), 
-							ntohl(oinfo_h->packets), 
-							ntohl(oinfo_h->crc),
-							oinfo_h->otype == MSYNC_OBJECT_TYPE_MANIFEST ? "Manifest" :
-								oinfo_h->otype ==  MSYNC_OBJECT_TYPE_RESERVED ? "Reserved" :
-									oinfo_h->otype == MSYNC_OBJECT_TYPE_MEDIA_MPEG2TS ? "MPEG2TS" : 
-										oinfo_h->otype == MSYNC_OBJECT_TYPE_MEDIA_CMAF ? "CMAF" :
-											oinfo_h->otype == MSYNC_OBJECT_TYPE_CONTROL ? "CONTROL" : "unknown",
-							mtype == MSYNC_MANIFEST_NA ? "NA" :
-								mtype ==  MSYNC_MANIFEST_MPEG_DASH ? "MEPG DASH" :
-									mtype ==  MSYNC_MANIFEST_HLS ? "HLS" : "unknown",
+							msync_h->type == MSYNC_PACKET_TYPE_OINFO ? "Object Info\t" : "Object Info Redundancy\t",
+							ntohl(oinfo_h->objSize), 
+							ntohl(oinfo_h->msyncPacketCount), 
+							ntohl(oinfo_h->objCrc),
+							oinfo_h->objType == MSYNC_OBJECT_TYPE_MEDIA_MANIFEST ? "Manifest" :
+								oinfo_h->objType ==  MSYNC_OBJECT_TYPE_RESERVED ? "Reserved" :
+									oinfo_h->objType == MSYNC_OBJECT_TYPE_MEDIA_MPEG2TS ? "MPEG2TS" : 
+										oinfo_h->objType == MSYNC_OBJECT_TYPE_MEDIA_CMAF ? "CMAF" :
+											oinfo_h->objType == MSYNC_OBJECT_TYPE_CONTROL ? "CONTROL" : "unknown",
+							mtype == MSYNC_MANIFEST_TYPE_NA ? "NA" :
+								mtype ==  MSYNC_MANIFEST_TYPE_MPEG_DASH ? "MEPG DASH" :
+									mtype ==  MSYNC_MANIFEST_TYPE_HLS ? "HLS" : "unknown",
 							uri_size,
-							oinfo_h->media_sequence,
+							oinfo_h->mediaSequence,
 							oinfo_h->uri);
 				
-				np->obj->size = ntohl(oinfo_h->size);           
-				np->obj->packets = ntohl(oinfo_h->packets);            
-				np->obj->crc = ntohl(oinfo_h->crc);                  
-				np->obj->otype= oinfo_h->otype;              
+				np->obj->size = ntohl(oinfo_h->objSize);           
+				np->obj->packets = ntohl(oinfo_h->msyncPacketCount);            
+				np->obj->crc = ntohl(oinfo_h->objCrc);                  
+				np->obj->otype= oinfo_h->objType;              
 				np->obj->mtype = mtype;
 				np->obj->uri_size = uri_size;     
-				np->obj->media_sequence = oinfo_h->media_sequence; 	   
-				memcpy(np->obj->uri, oinfo_h->uri, MIN(uri_size, MSYNC_URI_LENGTH_MAX - 1));
+				np->obj->media_sequence = oinfo_h->mediaSequence; 	   
+				memcpy(np->obj->uri, oinfo_h->uri, MIN(MIN(uri_size, MSYNC_URI_LENGTH_MAX - 1), max_uri_len ));
 				if (np->obj->fptr == NULL) {
 					create_file_path_dirs(np->obj->uri);
 					np->obj->fptr = fopen(np->obj->uri,"wb");
@@ -671,25 +663,25 @@ static void* msync_receiver(void* arg)
 			}
 			
 			/* Object Data Packet Header */
-			else if (msync_h->type == MSYNC_TYPE_ODATA && len >= MSYNC_ODATA_HEADER_LEN)
+			else if (msync_h->type == MSYNC_PACKET_TYPE_ODATA && len >= MSYNC_ODATA_HEADER_LEN)
 			{
 				if (verbose)
 					printf("  %d Data\t: offset: %u\n", 
 							*sd, 
-							ntohl(odata_h->offset));
+							ntohl(odata_h->objOffset));
 				if (np->obj->fptr == NULL) {
 					char buffer[32]; // The filename buffer.
     				snprintf(buffer, sizeof(char) * 32, "oid%i.tmp", ntohs(msync_h->object_id));
 					np->obj->fptr = fopen(buffer,"wb");
 					np->obj->received_object_info_before_data = false;
 				}
-				if (np->obj->fptr != NULL && lookup_packet(ntohl(odata_h->offset),np->obj->hashtab)== NULL){
-					fseek(np->obj->fptr, ntohl(odata_h->offset), SEEK_SET);
+				if (np->obj->fptr != NULL && lookup_packet(ntohl(odata_h->objOffset),np->obj->hashtab)== NULL){
+					fseek(np->obj->fptr, ntohl(odata_h->objOffset), SEEK_SET);
 					uint16_t data_len = len - MSYNC_ODATA_HEADER_LEN;
 					if (rtp) 
 						data_len = data_len - RTP_HEADER_LEN;
 					fwrite((char *) odata_h + MSYNC_ODATA_HEADER_LEN,1,data_len,np->obj->fptr);
-					put_packet(ntohl(odata_h->offset),np->obj->hashtab);
+					put_packet(ntohl(odata_h->objOffset),np->obj->hashtab);
 					np->obj->recvd_uniq_packets += 1;
 					if (np->obj->recvd_uniq_packets == np->obj->packets) { // We received all data for this object
 						fclose(np->obj->fptr);
@@ -704,22 +696,22 @@ static void* msync_receiver(void* arg)
 
 			}
 			/* Object HTTP Header Packet Header */
-			else if (msync_h->type == MSYNC_TYPE_OHTTP && len >= MSYNC_OHTTP_HEADER_LEN)
+			else if (msync_h->type == MSYNC_PACKET_TYPE_OHTTP_HEADER && len >= MSYNC_OHTTP_HEADER_LEN)
 			{	
 				if (verbose)
 					printf("  %d HTTP\t: header size %u, header offset: %u\n", 
 							*sd, 
-							ntohl(ohttp_h->header_size),
-							ntohl(ohttp_h->header_offset));
+							ntohl(ohttp_h->headerSize),
+							ntohl(ohttp_h->headerOffset));
 			}
 			/* Object Data-part Packet Header */
-			else if (msync_h->type == MSYNC_TYPE_ODATA_PART && len >= MSYNC_ODATA_PART_HEADER_LEN)
+			else if (msync_h->type == MSYNC_PACKET_TYPE_ODATA_PART && len >= MSYNC_ODATA_PART_HEADER_LEN)
 			{
 				if (verbose)
 					printf("  %d Object Data Part\t: offest %u, super offset: %u\n", 
 							*sd, 
-							ntohl(odata_part_h->offset),
-							ntohl(odata_part_h->super_offset));
+							ntohl(odata_part_h->objOffset),
+							ntohl(odata_part_h->superObjOffset));
 			}						
 		}
 		
@@ -748,8 +740,6 @@ int main(int argc, char** argv)
 
 	sigset_t sigmask;
 	int sig;
-
-#ifndef TARGETOS_eCos
 
 	const char opts[] = "m:i:l:p:rvh";
 	int c;
@@ -815,23 +805,7 @@ int main(int argc, char** argv)
 			return -1;
 		}
 	}
-#else /* TARGETOS_eCos */
-#define HOME_MEDIUM "238.38.43.1"
-#define FLUX3_3     "238.38.100.3"
-	if (inet_pton(AF_INET, HOME_MEDIUM, (void*)&ip_addr) != 1)
-	{
-		printf("Error: invalid IP address\n");
-		return -1;
-	}
-	memset(iname, 0, IF_NAMESIZE);
-	strncpy(iname, "bcm2", strlen("bcm2"));
-	// port is initialized at default value
-	// layers is initialized at default value
 
-	// Wait to be sure IP resources are initialized
-	sleep(70);
-	printf("Broadpeak msync receiver test tool \n");
-#endif
 
 	if (ip_addr.s_addr == 0)
 	{
